@@ -13,6 +13,7 @@ services:
       OMP_NUM_THREADS: "4"
       OPENOCR_DOC_MAX_PARALLEL_BLOCKS: "1"
       OPENOCR_FILE_URL_TIMEOUT_SECONDS: "30"
+      OPENOCR_JOB_RESULT_TTL_SECONDS: "86400"
       OPENOCR_MAX_UPLOAD_BYTES: "26214400"
     volumes:
       - openocr-cache:/root/.cache/openocr
