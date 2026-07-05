@@ -1,0 +1,15 @@
+meta {
+  name: YouTube - URL
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/youtube/url?url={{youtubeUrl}}
+  body: none
+  auth: none
+}
+
+headers {
+  X-API-Key: {{apiKey}}
+}

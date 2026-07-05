@@ -9,12 +9,16 @@ FastAPI wrapper for `openocr-python==0.1.5` with CPU-only runtime.
 - `POST /ocr/url?fileUrl=...`: query parameter `fileUrl`, creates an OCR job
 - `POST /doc/file`: multipart field `file`, creates a document parsing job
 - `POST /doc/url?fileUrl=...`: query parameter `fileUrl`, creates a document parsing job
+- `POST /csv/file`: multipart field `file`, creates a CSV extraction job
+- `POST /excel/file`: multipart field `file`, creates an Excel extraction job
+- `POST /youtube/url?url=...`: query parameter `url`, creates a YouTube transcript job
 - `GET /jobs/{job_id}`: polls job status/result
 
 Uploads are copied into `/tmp/openocr-jobs/<job_id>` and removed after processing.
 Job results are kept in memory for up to 24 hours after completion.
 Successful job results include a `markdown` field alongside the structured data.
 Restarting the container clears in-memory jobs and results.
+Excel extraction supports `.xlsx/.xlsm`; YouTube extraction uses available transcripts/captions.
 The service warms up OpenOCR models at startup and stores downloaded models in
 `/root/.cache/openocr`.
 
@@ -73,6 +77,14 @@ curl -X POST http://localhost:8000/doc/file \
   -F "file=@/path/to/document.pdf"
 
 curl -X POST "http://localhost:8000/doc/url?fileUrl=https://example.com/document.pdf"
+
+curl -X POST http://localhost:8000/csv/file \
+  -F "file=@/path/to/data.csv"
+
+curl -X POST http://localhost:8000/excel/file \
+  -F "file=@/path/to/workbook.xlsx"
+
+curl -X POST "http://localhost:8000/youtube/url?url=https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 When `API_KEY` is set:
