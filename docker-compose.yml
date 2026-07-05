@@ -18,8 +18,8 @@ services:
       OPENOCR_STT_MODEL_SIZE: small
       OPENOCR_STT_COMPUTE_TYPE: int8
       OPENOCR_STT_LANGUAGE: ""
-      OPENOCR_STT_BEAM_SIZE: "1"
-      OPENOCR_STT_VAD_FILTER: "true"
+      OPENOCR_STT_BEAM_SIZE: "5"
+      OPENOCR_STT_VAD_FILTER: "false"
     volumes:
       - openocr-cache:/root/.cache/openocr
     deploy:

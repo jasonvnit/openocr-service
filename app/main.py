@@ -42,11 +42,12 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 DOC_MAX_PARALLEL_BLOCKS = int(os.getenv("OPENOCR_DOC_MAX_PARALLEL_BLOCKS", "1"))
 FILE_URL_TIMEOUT_SECONDS = float(os.getenv("OPENOCR_FILE_URL_TIMEOUT_SECONDS", "30"))
 JOB_RESULT_TTL_SECONDS = int(os.getenv("OPENOCR_JOB_RESULT_TTL_SECONDS", str(24 * 60 * 60)))
+RESULT_LOG_PREVIEW_CHARS = 200
 STT_MODEL_SIZE = os.getenv("OPENOCR_STT_MODEL_SIZE", "small")
 STT_COMPUTE_TYPE = os.getenv("OPENOCR_STT_COMPUTE_TYPE", "int8")
 STT_LANGUAGE = os.getenv("OPENOCR_STT_LANGUAGE") or None
-STT_BEAM_SIZE = int(os.getenv("OPENOCR_STT_BEAM_SIZE", "1"))
-STT_VAD_FILTER = os.getenv("OPENOCR_STT_VAD_FILTER", "true").lower() in {"1", "true", "yes", "on"}
+STT_BEAM_SIZE = int(os.getenv("OPENOCR_STT_BEAM_SIZE", "5"))
+STT_VAD_FILTER = os.getenv("OPENOCR_STT_VAD_FILTER", "false").lower() in {"1", "true", "yes", "on"}
 OCR_TASKS = {"ocr", "doc"}
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PDF_SUFFIXES = {".pdf"}
@@ -349,13 +350,14 @@ def _run_job(
             _copy_file_url(file_url, input_path)
 
         result = _run_task(task, input_path, output_dir, file_url)
+        normalized_result = _normalize_result(task, result)
         _finish_job(
             job_id,
             status="succeeded",
-            result=_normalize_result(task, result),
+            result=normalized_result,
             error=None,
         )
-        _log_job_progress(job_id, task, "succeeded")
+        _log_job_progress(job_id, task, "succeeded", result=normalized_result)
     except HTTPException as exc:
         _finish_job(
             job_id,
@@ -444,8 +446,55 @@ def _cleanup_expired_jobs() -> None:
         _log_job_progress(job["job_id"], job["task"], "expired")
 
 
-def _log_job_progress(job_id: str, task: str, status: str) -> None:
-    logger.info("job_id=%s task=%s status=%s", job_id, task, status)
+def _log_job_progress(job_id: str, task: str, status: str, result: Any | None = None) -> None:
+    if status != "succeeded":
+        logger.info("job_id=%s task=%s status=%s", job_id, task, status)
+        return
+
+    preview = _result_log_preview(result)
+    if preview:
+        logger.info("job_id=%s task=%s status=%s text_preview=%r", job_id, task, status, preview)
+        return
+
+    logger.info("job_id=%s task=%s status=%s text_preview=''", job_id, task, status)
+
+def _result_log_preview(result: Any) -> str:
+    text = _find_result_text(result)
+    if not text:
+        return ""
+
+    normalized_text = " ".join(text.split())
+    if RESULT_LOG_PREVIEW_CHARS <= 0:
+        return ""
+
+    if len(normalized_text) <= RESULT_LOG_PREVIEW_CHARS:
+        return normalized_text
+
+    if RESULT_LOG_PREVIEW_CHARS <= 3:
+        return "." * RESULT_LOG_PREVIEW_CHARS
+
+    return normalized_text[: RESULT_LOG_PREVIEW_CHARS - 3].rstrip() + "..."
+
+def _find_result_text(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("markdown", "text", "transcription", "rec_text", "label"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                return text
+
+        for child in value.values():
+            text = _find_result_text(child)
+            if text:
+                return text
+        return ""
+
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            text = _find_result_text(child)
+            if text:
+                return text
+
+    return ""
 
 
 def _utc_now() -> datetime:

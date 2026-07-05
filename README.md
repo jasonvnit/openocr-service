@@ -34,8 +34,8 @@ The service warms up OpenOCR models at startup and stores downloaded models in
 - `OPENOCR_STT_MODEL_SIZE=small`: faster-whisper model size for audio/video transcription
 - `OPENOCR_STT_COMPUTE_TYPE=int8`: CPU-friendly faster-whisper compute type
 - `OPENOCR_STT_LANGUAGE=`: optional language code; empty means auto-detect
-- `OPENOCR_STT_BEAM_SIZE=1`: faster-whisper beam size
-- `OPENOCR_STT_VAD_FILTER=true`: enables voice activity detection during transcription
+- `OPENOCR_STT_BEAM_SIZE=5`: faster-whisper beam size
+- `OPENOCR_STT_VAD_FILTER=false`: disables voice activity detection during transcription
 
 ## Response Format
 
@@ -153,8 +153,8 @@ OPENOCR_MAX_UPLOAD_BYTES=26214400 \
 OPENOCR_STT_MODEL_SIZE=small \
 OPENOCR_STT_COMPUTE_TYPE=int8 \
 OPENOCR_STT_LANGUAGE="" \
-OPENOCR_STT_BEAM_SIZE=1 \
-OPENOCR_STT_VAD_FILTER=true \
+OPENOCR_STT_BEAM_SIZE=5 \
+OPENOCR_STT_VAD_FILTER=false \
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
