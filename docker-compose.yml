@@ -1,0 +1,26 @@
+services:
+  openocr-service:
+    build: .
+    image: openocr-service:latest
+    container_name: openocr-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Optional: set API_KEY to require X-API-Key on /ocr and /doc.
+      # API_KEY: change-me
+      HF_HOME: /root/.cache/openocr
+      OMP_NUM_THREADS: "4"
+      OPENOCR_DOC_MAX_PARALLEL_BLOCKS: "1"
+      OPENOCR_MAX_UPLOAD_BYTES: "26214400"
+    volumes:
+      - openocr-cache:/root/.cache/openocr
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          # The doc task loads layout ONNX and UniRecONNX; 4G is safer than 1.5G.
+          memory: 4096M
+
+volumes:
+  openocr-cache:
