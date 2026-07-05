@@ -1,6 +1,7 @@
 # openocr-service
 
-FastAPI wrapper for `openocr-python==0.1.5` with CPU-only runtime.
+FastAPI wrapper for `openocr-python==0.1.5` with CPU-only runtime and local
+speech-to-text via `faster-whisper`.
 
 ## Endpoints
 
@@ -14,7 +15,10 @@ Job results are kept in memory for up to 24 hours after completion.
 Successful job results include a `markdown` field alongside the structured data.
 Restarting the container clears in-memory jobs and results.
 Word extraction supports `.docx` and legacy `.doc`; Excel extraction supports `.xlsx/.xlsm`.
-PDF/image documents are handled by OpenOCR. YouTube URLs use available transcripts/captions.
+PDF/image documents are handled by OpenOCR. Audio/video files are transcribed
+with faster-whisper. YouTube URLs use available transcripts/captions.
+Speech-to-text supports `.aac`, `.flac`, `.m4a`, `.mp3`, `.ogg`, `.wav`,
+`.webm`, `.avi`, `.mkv`, `.mov`, and `.mp4`.
 The service warms up OpenOCR models at startup and stores downloaded models in
 `/root/.cache/openocr`.
 
@@ -27,6 +31,11 @@ The service warms up OpenOCR models at startup and stores downloaded models in
 - `OPENOCR_FILE_URL_TIMEOUT_SECONDS=30`: timeout for downloading remote URLs
 - `OPENOCR_JOB_RESULT_TTL_SECONDS=86400`: result retention after job completion
 - `OPENOCR_MAX_UPLOAD_BYTES=26214400`: max upload size, default 25 MB
+- `OPENOCR_STT_MODEL_SIZE=small`: faster-whisper model size for audio/video transcription
+- `OPENOCR_STT_COMPUTE_TYPE=int8`: CPU-friendly faster-whisper compute type
+- `OPENOCR_STT_LANGUAGE=`: optional language code; empty means auto-detect
+- `OPENOCR_STT_BEAM_SIZE=1`: faster-whisper beam size
+- `OPENOCR_STT_VAD_FILTER=true`: enables voice activity detection during transcription
 
 ## Response Format
 
@@ -37,7 +46,7 @@ The service warms up OpenOCR models at startup and stores downloaded models in
   "job_id": "uuid",
   "status": "queued",
   "status_url": "/jobs/uuid",
-  "task": "ocr|doc|word|csv|excel|youtube",
+  "task": "ocr|doc|word|csv|excel|youtube|speech",
   "source": "file|fileUrl|youtubeUrl",
   "filename": "input filename or detected id",
   "created_at": "2026-07-05T11:08:21.897597Z",
@@ -60,7 +69,7 @@ Common fields:
 
 - `job_id`: UUID for polling.
 - `status_url`: relative polling URL for this job.
-- `task`: detected extractor. `ocr` is image OCR, `doc` is PDF/OpenOCR document parsing, `word` is `.doc/.docx`, `csv` is CSV, `excel` is `.xlsx/.xlsm`, `youtube` is transcript extraction.
+- `task`: detected extractor. `ocr` is image OCR, `doc` is PDF/OpenOCR document parsing, `word` is `.doc/.docx`, `csv` is CSV, `excel` is `.xlsx/.xlsm`, `youtube` is transcript extraction, `speech` is audio/video speech-to-text.
 - `source`: input source. `file` means multipart upload, `fileUrl` means remote file URL, `youtubeUrl` means YouTube URL.
 - `filename`: uploaded filename, remote filename, or YouTube video id.
 - `created_at`, `started_at`, `completed_at`, `expires_at`: UTC ISO-8601 timestamps. `expires_at` is set after completion.
@@ -94,6 +103,13 @@ Result shape by task:
   - `segments[].text`: transcript text.
   - `segments[].start`: start time in seconds.
   - `segments[].duration`: segment duration in seconds.
+- `speech`: `{ "text": "...", "segments": [...], "segment_count": n, "language": "vi", "duration": seconds, "markdown": "..." }`
+  - `text`: full transcript as plain text.
+  - `segments[].text`: transcript text for one segment.
+  - `segments[].start`: segment start time in seconds.
+  - `segments[].end`: segment end time in seconds.
+  - `language`: detected language, or the value from `OPENOCR_STT_LANGUAGE`.
+  - `duration`: detected media duration in seconds when available.
 
 ## Build
 
@@ -134,10 +150,16 @@ OPENOCR_DOC_MAX_PARALLEL_BLOCKS=1 \
 OPENOCR_FILE_URL_TIMEOUT_SECONDS=30 \
 OPENOCR_JOB_RESULT_TTL_SECONDS=86400 \
 OPENOCR_MAX_UPLOAD_BYTES=26214400 \
+OPENOCR_STT_MODEL_SIZE=small \
+OPENOCR_STT_COMPUTE_TYPE=int8 \
+OPENOCR_STT_LANGUAGE="" \
+OPENOCR_STT_BEAM_SIZE=1 \
+OPENOCR_STT_VAD_FILTER=true \
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 Legacy `.doc` extraction uses `antiword`; install it locally if you need `.doc` support outside Docker.
+Audio/video transcription uses `ffmpeg`; install it locally if you need STT support outside Docker.
 
 ## Bruno
 
@@ -160,6 +182,11 @@ curl -X POST "http://localhost:8000/extract/url?url=https://example.com/document
 curl -X POST "http://localhost:8000/extract/url?url=https://example.com/data.csv"
 
 curl -X POST "http://localhost:8000/extract/url?url=https://example.com/workbook.xlsx"
+
+curl -X POST "http://localhost:8000/extract/url?url=https://example.com/audio.mp3"
+
+curl -X POST http://localhost:8000/extract/file \
+  -F "file=@/path/to/audio.mp3"
 
 curl -X POST "http://localhost:8000/extract/url?url=https://www.youtube.com/watch?v=VIDEO_ID"
 ```

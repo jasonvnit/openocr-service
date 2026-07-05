@@ -7,7 +7,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Optional: set API_KEY to require X-API-Key on /ocr and /doc.
+      # Optional: set API_KEY to require X-API-Key on /extract/* and /jobs/*.
       # API_KEY: change-me
       HF_HOME: /root/.cache/openocr
       OMP_NUM_THREADS: "4"
@@ -15,13 +15,18 @@ services:
       OPENOCR_FILE_URL_TIMEOUT_SECONDS: "30"
       OPENOCR_JOB_RESULT_TTL_SECONDS: "86400"
       OPENOCR_MAX_UPLOAD_BYTES: "26214400"
+      OPENOCR_STT_MODEL_SIZE: small
+      OPENOCR_STT_COMPUTE_TYPE: int8
+      OPENOCR_STT_LANGUAGE: ""
+      OPENOCR_STT_BEAM_SIZE: "1"
+      OPENOCR_STT_VAD_FILTER: "true"
     volumes:
       - openocr-cache:/root/.cache/openocr
     deploy:
       resources:
         limits:
           cpus: "4.0"
-          # The doc task loads layout ONNX and UniRecONNX; 4G is safer than 1.5G.
+          # Doc and speech models are memory-heavy; raise to 6144M if jobs OOM.
           memory: 4096M
 
 volumes:

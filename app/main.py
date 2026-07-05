@@ -42,16 +42,25 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 DOC_MAX_PARALLEL_BLOCKS = int(os.getenv("OPENOCR_DOC_MAX_PARALLEL_BLOCKS", "1"))
 FILE_URL_TIMEOUT_SECONDS = float(os.getenv("OPENOCR_FILE_URL_TIMEOUT_SECONDS", "30"))
 JOB_RESULT_TTL_SECONDS = int(os.getenv("OPENOCR_JOB_RESULT_TTL_SECONDS", str(24 * 60 * 60)))
+STT_MODEL_SIZE = os.getenv("OPENOCR_STT_MODEL_SIZE", "small")
+STT_COMPUTE_TYPE = os.getenv("OPENOCR_STT_COMPUTE_TYPE", "int8")
+STT_LANGUAGE = os.getenv("OPENOCR_STT_LANGUAGE") or None
+STT_BEAM_SIZE = int(os.getenv("OPENOCR_STT_BEAM_SIZE", "1"))
+STT_VAD_FILTER = os.getenv("OPENOCR_STT_VAD_FILTER", "true").lower() in {"1", "true", "yes", "on"}
 OCR_TASKS = {"ocr", "doc"}
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 PDF_SUFFIXES = {".pdf"}
 WORD_SUFFIXES = {".doc", ".docx"}
 CSV_SUFFIXES = {".csv"}
 EXCEL_SUFFIXES = {".xlsm", ".xlsx"}
+AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".webm"}
+VIDEO_SUFFIXES = {".avi", ".mkv", ".mov", ".mp4", ".webm"}
 
 _engine_lock = threading.Lock()
 _active_engine: Any | None = None
 _active_engine_key: str | None = None
+_speech_lock = threading.Lock()
+_speech_model: Any | None = None
 _jobs_lock = threading.Lock()
 _jobs: dict[str, dict[str, Any]] = {}
 _cleanup_stop_event = threading.Event()
@@ -271,11 +280,14 @@ def _detect_task_from_filename(filename: str | None) -> str:
     if suffix in EXCEL_SUFFIXES:
         return "excel"
 
+    if suffix in AUDIO_SUFFIXES or suffix in VIDEO_SUFFIXES:
+        return "speech"
+
     raise HTTPException(
         status_code=400,
         detail=(
             "Unsupported file type. Supported types: images, pdf, doc, docx, csv, xlsx, xlsm, "
-            "and YouTube URLs."
+            "audio, video, and YouTube URLs."
         ),
     )
 
@@ -473,6 +485,9 @@ def _run_task(
     if task == "youtube":
         return _read_youtube_transcript(file_url)
 
+    if task == "speech":
+        return _run_speech_task(input_path)
+
     raise ValueError(f"Unsupported task: {task}")
 
 
@@ -631,11 +646,13 @@ def _read_youtube_transcript(youtube_url: str | None) -> dict[str, Any]:
     if not video_id:
         raise HTTPException(status_code=400, detail="Invalid YouTube URL.")
 
+    languages = ["vi", "en", "en-US"]
+
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(
-            video_id,
-            languages=["vi", "en", "en-US"],
-        )
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+        else:
+            transcript = YouTubeTranscriptApi().fetch(video_id, languages=languages).to_raw_data()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"YouTube transcript unavailable: {exc}") from exc
 
@@ -656,6 +673,57 @@ def _read_youtube_transcript(youtube_url: str | None) -> dict[str, Any]:
         "segment_count": len(segments),
         "markdown": markdown,
     }
+
+def _run_speech_task(input_path: Path) -> dict[str, Any]:
+    with _speech_lock, _engine_lock:
+        _release_openocr_engine()
+        model = _get_speech_model()
+        segments_iter, info = model.transcribe(
+            str(input_path),
+            language=STT_LANGUAGE,
+            beam_size=STT_BEAM_SIZE,
+            vad_filter=STT_VAD_FILTER,
+        )
+        segments = [
+            {
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+            }
+            for segment in segments_iter
+            if segment.text and segment.text.strip()
+        ]
+
+    text = " ".join(segment["text"] for segment in segments).strip()
+    markdown = "\n\n".join(segment["text"] for segment in segments).strip()
+
+    return {
+        "text": text,
+        "segments": segments,
+        "segment_count": len(segments),
+        "language": getattr(info, "language", STT_LANGUAGE),
+        "duration": getattr(info, "duration", None),
+        "markdown": markdown,
+    }
+
+
+def _get_speech_model() -> Any:
+    global _speech_model
+
+    if _speech_model is not None:
+        return _speech_model
+
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="faster-whisper is not installed.") from exc
+
+    _speech_model = WhisperModel(
+        STT_MODEL_SIZE,
+        device="cpu",
+        compute_type=STT_COMPUTE_TYPE,
+    )
+    return _speech_model
 
 
 def _youtube_video_id(youtube_url: str | None) -> str | None:
@@ -899,9 +967,8 @@ def _get_engine(task: str) -> Any:
     if _active_engine is not None and _active_engine_key == task:
         return _active_engine
 
-    _active_engine = None
-    _active_engine_key = None
-    gc.collect()
+    _release_openocr_engine()
+    _release_speech_model()
 
     if task == "ocr":
         # infer_e2e.py compares use_gpu with `==` against the string 'false'.
@@ -921,6 +988,21 @@ def _get_engine(task: str) -> Any:
 
     _active_engine_key = task
     return _active_engine
+
+
+def _release_openocr_engine() -> None:
+    global _active_engine, _active_engine_key
+
+    _active_engine = None
+    _active_engine_key = None
+    gc.collect()
+
+
+def _release_speech_model() -> None:
+    global _speech_model
+
+    _speech_model = None
+    gc.collect()
 
 
 def _warm_up_models() -> None:
