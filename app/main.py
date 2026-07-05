@@ -20,6 +20,11 @@ except ImportError as exc:  # pragma: no cover - startup guard for misconfigured
 else:
     OPENOCR_IMPORT_ERROR = None
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
+    datefmt="%Y/%m/%d %H:%M:%S",
+)
 logger = logging.getLogger(__name__)
 
 TMP_ROOT = Path(os.getenv("OPENOCR_TMP_DIR", "/tmp"))
@@ -185,12 +190,16 @@ def _get_engine(task: str) -> Any:
     gc.collect()
 
     if task == "ocr":
+        # infer_e2e.py compares use_gpu with `==` against the string 'false'.
         _active_engine = OpenOCR(task="ocr", mode="mobile", use_gpu="false")
     elif task == "doc":
+        # infer_doc_onnx.py / infer_unirec_onnx.py compare use_gpu with `is False`,
+        # so a string here silently falls through to GPU auto-detection instead of
+        # forcing CPU.
         _active_engine = OpenOCR(
             task="doc",
             use_layout_detection=True,
-            use_gpu="false",
+            use_gpu=False,
             max_parallel_blocks=DOC_MAX_PARALLEL_BLOCKS,
         )
     else:
