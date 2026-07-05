@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import uuid
 from contextlib import asynccontextmanager
@@ -42,6 +43,11 @@ DOC_MAX_PARALLEL_BLOCKS = int(os.getenv("OPENOCR_DOC_MAX_PARALLEL_BLOCKS", "1"))
 FILE_URL_TIMEOUT_SECONDS = float(os.getenv("OPENOCR_FILE_URL_TIMEOUT_SECONDS", "30"))
 JOB_RESULT_TTL_SECONDS = int(os.getenv("OPENOCR_JOB_RESULT_TTL_SECONDS", str(24 * 60 * 60)))
 OCR_TASKS = {"ocr", "doc"}
+IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+PDF_SUFFIXES = {".pdf"}
+WORD_SUFFIXES = {".doc", ".docx"}
+CSV_SUFFIXES = {".csv"}
+EXCEL_SUFFIXES = {".xlsm", ".xlsx"}
 
 _engine_lock = threading.Lock()
 _active_engine: Any | None = None
@@ -79,60 +85,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/ocr/file")
-async def ocr_file(
+@app.post("/extract/file")
+async def extract_file(
     file: UploadFile = File(...),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _create_file_job(file, "ocr")
+    return await _create_file_job(file)
 
 
-@app.post("/ocr/url")
-async def ocr_url(
-    file_url: str | None = Query(default=None, alias="fileUrl"),
-    _: None = Depends(_require_api_key),
-) -> dict[str, Any]:
-    return await _create_url_job(file_url, "ocr")
-
-
-@app.post("/doc/file")
-async def doc_file(
-    file: UploadFile = File(...),
-    _: None = Depends(_require_api_key),
-) -> dict[str, Any]:
-    return await _create_file_job(file, "doc")
-
-
-@app.post("/doc/url")
-async def doc_url(
-    file_url: str | None = Query(default=None, alias="fileUrl"),
-    _: None = Depends(_require_api_key),
-) -> dict[str, Any]:
-    return await _create_url_job(file_url, "doc")
-
-
-@app.post("/csv/file")
-async def csv_file(
-    file: UploadFile = File(...),
-    _: None = Depends(_require_api_key),
-) -> dict[str, Any]:
-    return await _create_file_job(file, "csv")
-
-
-@app.post("/excel/file")
-async def excel_file(
-    file: UploadFile = File(...),
-    _: None = Depends(_require_api_key),
-) -> dict[str, Any]:
-    return await _create_file_job(file, "excel")
-
-
-@app.post("/youtube/url")
-async def youtube_url(
+@app.post("/extract/url")
+async def extract_url(
     url: str | None = Query(default=None),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _create_url_job(url, "youtube")
+    return await _create_url_job(url)
 
 
 @app.get("/jobs/{job_id}")
@@ -150,7 +116,8 @@ def get_job(
         return _public_job(job)
 
 
-async def _create_file_job(file: UploadFile, task: str) -> dict[str, Any]:
+async def _create_file_job(file: UploadFile) -> dict[str, Any]:
+    task = _detect_task_from_filename(file.filename)
     _ensure_task_available(task)
 
     job_id = str(uuid.uuid4())
@@ -175,17 +142,14 @@ async def _create_file_job(file: UploadFile, task: str) -> dict[str, Any]:
         await file.close()
 
 
-async def _create_url_job(file_url: str | None, task: str) -> dict[str, Any]:
-    _ensure_task_available(task)
-
+async def _create_url_job(file_url: str | None) -> dict[str, Any]:
     file_url = file_url.strip() if file_url else None
     if not file_url:
-        field_name = "url" if task == "youtube" else "fileUrl"
-        raise HTTPException(status_code=400, detail=f"{field_name} is required.")
+        raise HTTPException(status_code=400, detail="url is required.")
 
     _validate_file_url(file_url)
-    if task == "youtube" and not _youtube_video_id(file_url):
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL.")
+    task = _detect_task_from_url(file_url)
+    _ensure_task_available(task)
 
     job_id = str(uuid.uuid4())
     work_dir = JOB_ROOT / job_id
@@ -261,7 +225,7 @@ def _copy_file_url(file_url: str, dst_path: Path) -> None:
             if content_length_bytes > MAX_UPLOAD_BYTES:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"fileUrl too large. Max size is {MAX_UPLOAD_BYTES} bytes.",
+                    detail=f"url too large. Max size is {MAX_UPLOAD_BYTES} bytes.",
                 )
 
             _copy_upload(response, dst_path)
@@ -270,16 +234,50 @@ def _copy_file_url(file_url: str, dst_path: Path) -> None:
     except HTTPError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"fileUrl download failed with HTTP {exc.code}.",
+            detail=f"url download failed with HTTP {exc.code}.",
         ) from exc
     except (TimeoutError, URLError, OSError) as exc:
-        raise HTTPException(status_code=400, detail=f"fileUrl download failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail=f"url download failed: {exc}") from exc
 
 
 def _validate_file_url(file_url: str) -> None:
     parsed_url = urlparse(file_url)
     if parsed_url.scheme not in {"http", "https"}:
-        raise HTTPException(status_code=400, detail="fileUrl must use http or https.")
+        raise HTTPException(status_code=400, detail="url must use http or https.")
+
+
+def _detect_task_from_url(file_url: str) -> str:
+    if _youtube_video_id(file_url):
+        return "youtube"
+
+    return _detect_task_from_filename(_filename_from_url(file_url))
+
+
+def _detect_task_from_filename(filename: str | None) -> str:
+    suffix = Path(filename or "").suffix.lower()
+
+    if suffix in IMAGE_SUFFIXES:
+        return "ocr"
+
+    if suffix in PDF_SUFFIXES:
+        return "doc"
+
+    if suffix in WORD_SUFFIXES:
+        return "word"
+
+    if suffix in CSV_SUFFIXES:
+        return "csv"
+
+    if suffix in EXCEL_SUFFIXES:
+        return "excel"
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Unsupported file type. Supported types: images, pdf, doc, docx, csv, xlsx, xlsm, "
+            "and YouTube URLs."
+        ),
+    )
 
 
 def _filename_from_url(file_url: str | None) -> str | None:
@@ -335,7 +333,7 @@ def _run_job(
     _log_job_progress(job_id, task, "running")
 
     try:
-        if file_url and task in OCR_TASKS:
+        if file_url and task != "youtube":
             _copy_file_url(file_url, input_path)
 
         result = _run_task(task, input_path, output_dir, file_url)
@@ -463,6 +461,9 @@ def _run_task(
     if task in OCR_TASKS:
         return _run_openocr(task, input_path, output_dir)
 
+    if task == "word":
+        return _run_word_task(input_path)
+
     if task == "csv":
         return _read_csv_file(input_path)
 
@@ -473,6 +474,80 @@ def _run_task(
         return _read_youtube_transcript(file_url)
 
     raise ValueError(f"Unsupported task: {task}")
+
+
+def _run_word_task(input_path: Path) -> Any:
+    suffix = input_path.suffix.lower()
+    if suffix == ".docx":
+        return _read_docx_file(input_path)
+
+    if suffix == ".doc":
+        return _read_doc_file(input_path)
+
+    raise HTTPException(status_code=400, detail="Unsupported Word file type.")
+
+
+def _read_docx_file(input_path: Path) -> dict[str, Any]:
+    try:
+        from docx import Document
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="python-docx is not installed.") from exc
+
+    document = Document(input_path)
+    paragraphs = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text and paragraph.text.strip()
+    ]
+    tables = [_docx_table_to_rows(table) for table in document.tables]
+
+    markdown_sections = [*paragraphs]
+    for index, table_rows in enumerate(tables, start=1):
+        table_markdown = _table_rows_to_markdown(table_rows)
+        if table_markdown:
+            markdown_sections.append(f"## Table {index}\n\n{table_markdown}")
+
+    return {
+        "paragraphs": paragraphs,
+        "tables": tables,
+        "paragraph_count": len(paragraphs),
+        "table_count": len(tables),
+        "markdown": "\n\n".join(markdown_sections).strip(),
+    }
+
+
+def _read_doc_file(input_path: Path) -> dict[str, Any]:
+    antiword_path = shutil.which("antiword")
+    if antiword_path is None:
+        raise HTTPException(
+            status_code=500,
+            detail="antiword is not installed; legacy .doc extraction is unavailable.",
+        )
+
+    result = subprocess.run(
+        [antiword_path, str(input_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "antiword failed to extract .doc content."
+        raise HTTPException(status_code=500, detail=detail)
+
+    text = result.stdout.strip()
+    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
+    return {
+        "paragraphs": paragraphs,
+        "paragraph_count": len(paragraphs),
+        "markdown": "\n\n".join(paragraphs).strip(),
+    }
+
+
+def _docx_table_to_rows(table: Any) -> list[list[str]]:
+    return [
+        [_stringify_cell(cell.text).strip() for cell in row.cells]
+        for row in table.rows
+    ]
 
 
 def _read_csv_file(input_path: Path) -> dict[str, Any]:
@@ -647,6 +722,16 @@ def _rows_to_markdown(columns: list[str], rows: list[list[str]]) -> str:
         table_lines.append("| " + " | ".join(_escape_markdown_cell(value) for value in values) + " |")
 
     return "\n".join(table_lines)
+
+
+def _table_rows_to_markdown(rows: list[list[str]]) -> str:
+    rows = _trim_empty_rows(rows)
+    if not rows:
+        return ""
+
+    columns = rows[0]
+    data_rows = rows[1:]
+    return _rows_to_markdown(columns, data_rows)
 
 
 def _pad_row(row: list[str], column_count: int) -> list[str]:

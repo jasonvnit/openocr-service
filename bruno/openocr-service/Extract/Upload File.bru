@@ -1,11 +1,11 @@
 meta {
-  name: OCR - Upload File
+  name: Extract - Upload File
   type: http
   seq: 1
 }
 
 post {
-  url: {{baseUrl}}/ocr/file
+  url: {{baseUrl}}/extract/file
   body: multipartForm
   auth: none
 }
@@ -15,5 +15,5 @@ headers {
 }
 
 body:multipart-form {
-  file: @{{ocrFilePath}}
+  file: @{{extractFilePath}}
 }
