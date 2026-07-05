@@ -8,8 +8,11 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 try:
@@ -32,6 +35,7 @@ API_KEY = os.getenv("API_KEY")
 MAX_UPLOAD_BYTES = int(os.getenv("OPENOCR_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 DOC_MAX_PARALLEL_BLOCKS = int(os.getenv("OPENOCR_DOC_MAX_PARALLEL_BLOCKS", "1"))
+FILE_URL_TIMEOUT_SECONDS = float(os.getenv("OPENOCR_FILE_URL_TIMEOUT_SECONDS", "30"))
 
 _engine_lock = threading.Lock()
 _active_engine: Any | None = None
@@ -62,26 +66,36 @@ def health() -> dict[str, str]:
 
 @app.post("/ocr")
 async def ocr(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_url: str | None = Form(default=None, alias="fileUrl"),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _process_upload(file, "ocr")
+    return await _process_input(file, file_url, "ocr")
 
 
 @app.post("/doc")
 async def doc(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(default=None),
+    file_url: str | None = Form(default=None, alias="fileUrl"),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _process_upload(file, "doc")
+    return await _process_input(file, file_url, "doc")
 
 
-async def _process_upload(file: UploadFile, task: str) -> dict[str, Any]:
+async def _process_input(
+    file: UploadFile | None,
+    file_url: str | None,
+    task: str,
+) -> dict[str, Any]:
     if OPENOCR_IMPORT_ERROR is not None:
         raise HTTPException(
             status_code=500,
             detail=f"openocr-python is not installed correctly: {OPENOCR_IMPORT_ERROR}",
         )
+
+    file_url = file_url.strip() if file_url else None
+    if (file is None and not file_url) or (file is not None and file_url):
+        raise HTTPException(status_code=400, detail="Send exactly one of file or fileUrl.")
 
     request_id = str(uuid.uuid4())
     work_dir = TMP_ROOT / f"openocr-{request_id}"
@@ -89,15 +103,22 @@ async def _process_upload(file: UploadFile, task: str) -> dict[str, Any]:
     work_dir.mkdir(parents=True, exist_ok=False)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    upload_path = work_dir / _safe_upload_name(file.filename, request_id)
+    source_name = file.filename if file is not None else _filename_from_url(file_url)
+    input_path = work_dir / _safe_input_name(source_name, request_id)
 
     try:
-        await run_in_threadpool(_copy_upload, file.file, upload_path)
+        if file is not None:
+            source = "file"
+            await run_in_threadpool(_copy_upload, file.file, input_path)
+        else:
+            source = "fileUrl"
+            await run_in_threadpool(_copy_file_url, file_url, input_path)
 
-        result = await run_in_threadpool(_run_openocr, task, upload_path, output_dir)
+        result = await run_in_threadpool(_run_openocr, task, input_path, output_dir)
         return {
             "request_id": request_id,
-            "filename": file.filename,
+            "source": source,
+            "filename": source_name,
             "task": task,
             "result": _normalize_result(task, result),
         }
@@ -106,7 +127,8 @@ async def _process_upload(file: UploadFile, task: str) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        await file.close()
+        if file is not None:
+            await file.close()
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
@@ -124,7 +146,49 @@ def _copy_upload(src: Any, dst_path: Path) -> None:
             dst.write(chunk)
 
 
-def _safe_upload_name(filename: str | None, request_id: str) -> str:
+def _copy_file_url(file_url: str, dst_path: Path) -> None:
+    parsed_url = urlparse(file_url)
+    if parsed_url.scheme not in {"http", "https"}:
+        raise HTTPException(status_code=400, detail="fileUrl must use http or https.")
+
+    request = Request(file_url, headers={"User-Agent": "openocr-service/1.0"})
+
+    try:
+        with urlopen(request, timeout=FILE_URL_TIMEOUT_SECONDS) as response:
+            content_length = response.headers.get("Content-Length")
+            try:
+                content_length_bytes = int(content_length) if content_length else 0
+            except ValueError:
+                content_length_bytes = 0
+
+            if content_length_bytes > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"fileUrl too large. Max size is {MAX_UPLOAD_BYTES} bytes.",
+                )
+
+            _copy_upload(response, dst_path)
+    except HTTPException:
+        raise
+    except HTTPError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"fileUrl download failed with HTTP {exc.code}.",
+        ) from exc
+    except (TimeoutError, URLError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"fileUrl download failed: {exc}") from exc
+
+
+def _filename_from_url(file_url: str | None) -> str | None:
+    if not file_url:
+        return None
+
+    parsed_url = urlparse(file_url)
+    filename = Path(unquote(parsed_url.path)).name
+    return filename or None
+
+
+def _safe_input_name(filename: str | None, request_id: str) -> str:
     suffix = Path(filename or "").suffix.lower()
     return f"{request_id}{suffix}"
 
