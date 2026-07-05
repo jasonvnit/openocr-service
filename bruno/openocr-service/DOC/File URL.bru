@@ -5,15 +5,11 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/doc
-  body: multipartForm
+  url: {{baseUrl}}/doc/url?fileUrl={{docFileUrl}}
+  body: none
   auth: none
 }
 
 headers {
   X-API-Key: {{apiKey}}
-}
-
-body:multipart-form {
-  fileUrl: {{docFileUrl}}
 }

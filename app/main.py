@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 try:
@@ -76,22 +76,36 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/ocr")
-async def ocr(
-    file: UploadFile | None = File(default=None),
-    file_url: str | None = Form(default=None, alias="fileUrl"),
+@app.post("/ocr/file")
+async def ocr_file(
+    file: UploadFile = File(...),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _create_job(file, file_url, "ocr")
+    return await _create_file_job(file, "ocr")
 
 
-@app.post("/doc")
-async def doc(
-    file: UploadFile | None = File(default=None),
-    file_url: str | None = Form(default=None, alias="fileUrl"),
+@app.post("/ocr/url")
+async def ocr_url(
+    file_url: str | None = Query(default=None, alias="fileUrl"),
     _: None = Depends(_require_api_key),
 ) -> dict[str, Any]:
-    return await _create_job(file, file_url, "doc")
+    return await _create_url_job(file_url, "ocr")
+
+
+@app.post("/doc/file")
+async def doc_file(
+    file: UploadFile = File(...),
+    _: None = Depends(_require_api_key),
+) -> dict[str, Any]:
+    return await _create_file_job(file, "doc")
+
+
+@app.post("/doc/url")
+async def doc_url(
+    file_url: str | None = Query(default=None, alias="fileUrl"),
+    _: None = Depends(_require_api_key),
+) -> dict[str, Any]:
+    return await _create_url_job(file_url, "doc")
 
 
 @app.get("/jobs/{job_id}")
@@ -109,23 +123,12 @@ def get_job(
         return _public_job(job)
 
 
-async def _create_job(
-    file: UploadFile | None,
-    file_url: str | None,
-    task: str,
-) -> dict[str, Any]:
+async def _create_file_job(file: UploadFile, task: str) -> dict[str, Any]:
     if OPENOCR_IMPORT_ERROR is not None:
         raise HTTPException(
             status_code=500,
             detail=f"openocr-python is not installed correctly: {OPENOCR_IMPORT_ERROR}",
         )
-
-    file_url = file_url.strip() if file_url else None
-    if (file is None and not file_url) or (file is not None and file_url):
-        raise HTTPException(status_code=400, detail="Send exactly one of file or fileUrl.")
-
-    if file_url:
-        _validate_file_url(file_url)
 
     job_id = str(uuid.uuid4())
     work_dir = JOB_ROOT / job_id
@@ -133,28 +136,12 @@ async def _create_job(
     work_dir.mkdir(parents=True, exist_ok=False)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    source_name = file.filename if file is not None else _filename_from_url(file_url)
+    source_name = file.filename
     input_path = work_dir / _safe_input_name(source_name, job_id)
-    source = "file" if file is not None else "fileUrl"
 
     try:
-        if file is not None:
-            await run_in_threadpool(_copy_upload, file.file, input_path)
-
-        job = _new_job(job_id, task, source, source_name, file_url, work_dir)
-        with _jobs_lock:
-            _jobs[job_id] = job
-
-        _log_job_progress(job_id, task, "queued")
-        response = _public_job(job)
-        thread = threading.Thread(
-            target=_run_job,
-            args=(job_id, task, input_path, output_dir, file_url),
-            daemon=True,
-        )
-        thread.start()
-
-        return response
+        await run_in_threadpool(_copy_upload, file.file, input_path)
+        return _start_job(job_id, task, "file", source_name, None, work_dir, input_path, output_dir)
     except HTTPException:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
@@ -162,8 +149,64 @@ async def _create_job(
         shutil.rmtree(work_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        if file is not None:
-            await file.close()
+        await file.close()
+
+
+async def _create_url_job(file_url: str | None, task: str) -> dict[str, Any]:
+    if OPENOCR_IMPORT_ERROR is not None:
+        raise HTTPException(
+            status_code=500,
+            detail=f"openocr-python is not installed correctly: {OPENOCR_IMPORT_ERROR}",
+        )
+
+    file_url = file_url.strip() if file_url else None
+    if not file_url:
+        raise HTTPException(status_code=400, detail="fileUrl is required.")
+
+    _validate_file_url(file_url)
+
+    job_id = str(uuid.uuid4())
+    work_dir = JOB_ROOT / job_id
+    output_dir = work_dir / "output"
+    work_dir.mkdir(parents=True, exist_ok=False)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    source_name = _filename_from_url(file_url)
+    input_path = work_dir / _safe_input_name(source_name, job_id)
+
+    try:
+        return _start_job(job_id, task, "fileUrl", source_name, file_url, work_dir, input_path, output_dir)
+    except HTTPException:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _start_job(
+    job_id: str,
+    task: str,
+    source: str,
+    source_name: str | None,
+    file_url: str | None,
+    work_dir: Path,
+    input_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    job = _new_job(job_id, task, source, source_name, file_url, work_dir)
+    with _jobs_lock:
+        _jobs[job_id] = job
+
+    _log_job_progress(job_id, task, "queued")
+    response = _public_job(job)
+    thread = threading.Thread(
+        target=_run_job,
+        args=(job_id, task, input_path, output_dir, file_url),
+        daemon=True,
+    )
+    thread.start()
+    return response
 
 
 def _copy_upload(src: Any, dst_path: Path) -> None:
@@ -395,10 +438,11 @@ def _run_openocr(task: str, input_path: Path, output_dir: Path) -> Any:
 
 def _normalize_result(task: str, result: Any) -> Any:
     if task != "ocr":
-        return _to_jsonable(result)
+        normalized = _to_jsonable(result)
+        return _with_markdown(task, normalized)
 
     if result is None:
-        return {"items": [], "timings": []}
+        return _with_markdown(task, {"items": [], "timings": []})
 
     if (
         isinstance(result, tuple)
@@ -406,17 +450,117 @@ def _normalize_result(task: str, result: Any) -> Any:
     ):
         lines, timings = result
         if lines is None and timings is None:
-            return {"items": [], "timings": []}
+            return _with_markdown(task, {"items": [], "timings": []})
 
         if not lines:
-            return {"items": [], "timings": _to_jsonable(timings) or []}
+            return _with_markdown(task, {"items": [], "timings": _to_jsonable(timings) or []})
 
-        return {
+        normalized = {
             "items": [_parse_ocr_line(line) for line in lines],
             "timings": _to_jsonable(timings) or [],
         }
+        return _with_markdown(task, normalized)
 
-    return _to_jsonable(result)
+    normalized = _to_jsonable(result)
+    return _with_markdown(task, normalized)
+
+
+def _with_markdown(task: str, result: Any) -> dict[str, Any]:
+    markdown = _result_to_markdown(task, result)
+
+    if isinstance(result, dict):
+        return {**result, "markdown": markdown}
+
+    return {"data": result, "markdown": markdown}
+
+
+def _result_to_markdown(task: str, result: Any) -> str:
+    if task == "ocr":
+        return _ocr_result_to_markdown(result)
+
+    markdown = _find_markdown(result)
+    if markdown:
+        return markdown
+
+    return "```json\n" + json.dumps(result, ensure_ascii=False, indent=2) + "\n```"
+
+
+def _ocr_result_to_markdown(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+
+    sections: list[str] = []
+    for item in result.get("items", []):
+        if not isinstance(item, dict):
+            continue
+
+        image_name = item.get("image_name")
+        if image_name:
+            sections.append(f"## {image_name}")
+
+        texts = _extract_ocr_texts(item.get("ocr"))
+        sections.extend(texts)
+
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+def _extract_ocr_texts(value: Any) -> list[str]:
+    texts: list[str] = []
+
+    if isinstance(value, dict):
+        for key in ("text", "transcription", "rec_text", "label"):
+            text = value.get(key)
+            if isinstance(text, str) and text.strip():
+                texts.append(text.strip())
+
+        for child in value.values():
+            texts.extend(_extract_ocr_texts(child))
+        return _dedupe_texts(texts)
+
+    if isinstance(value, (list, tuple)):
+        if len(value) >= 2 and isinstance(value[1], (list, tuple)):
+            candidate = value[1][0] if value[1] else None
+            if isinstance(candidate, str) and candidate.strip():
+                texts.append(candidate.strip())
+
+        for child in value:
+            texts.extend(_extract_ocr_texts(child))
+        return _dedupe_texts(texts)
+
+    return texts
+
+
+def _find_markdown(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("markdown", "md", "markdown_text", "md_content"):
+            markdown = value.get(key)
+            if isinstance(markdown, str) and markdown.strip():
+                return markdown
+
+        for child in value.values():
+            markdown = _find_markdown(child)
+            if markdown:
+                return markdown
+
+    if isinstance(value, list):
+        for child in value:
+            markdown = _find_markdown(child)
+            if markdown:
+                return markdown
+
+    return None
+
+
+def _dedupe_texts(texts: list[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+
+    for text in texts:
+        if text not in seen:
+            seen.add(text)
+            deduped.append(text)
+
+    return deduped
 
 
 def _parse_ocr_line(line: Any) -> Any:

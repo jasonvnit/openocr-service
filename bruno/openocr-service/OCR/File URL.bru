@@ -5,15 +5,11 @@ meta {
 }
 
 post {
-  url: {{baseUrl}}/ocr
-  body: multipartForm
+  url: {{baseUrl}}/ocr/url?fileUrl=https://onlinetexttools.com/images/examples-onlinetexttools/letter-to-santa-claus.png
+  body: none
   auth: none
 }
 
 headers {
   X-API-Key: {{apiKey}}
-}
-
-body:multipart-form {
-  fileUrl: https://onlinetexttools.com/images/examples-onlinetexttools/letter-to-santa-claus.png
 }
