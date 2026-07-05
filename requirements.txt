@@ -1,8 +1,8 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
+fastapi==0.139.0
+uvicorn[standard]==0.50.0
+python-multipart==0.0.32
 openocr-python==0.1.5
 openpyxl==3.1.5
-python-docx==1.1.2
+python-docx==1.2.0
 youtube-transcript-api==1.2.4
-faster-whisper==1.1.1
+faster-whisper==1.2.1
